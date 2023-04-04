@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<configuration>
+	<startup>
+		<supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.7.2" />
+	</startup>
+	<appSettings>
+		<add key="FolderPath" value="D:\MaintenixProcess\"/>
+		<add key="SubFolderPath" value="D:\MaintenixProcess\InProgress\"/>
+		
+		<add key="ErrorPath" value="D:\MaintenixProcess\Error\"/>
+		<add key="ProcessedPath" value="D:\MaintenixProcess\Success\"/>
+		<add key ="RequestXML" value="D:\Request.xml"/>
+		<add key ="AddFlights" value="D:\AddFlights.xml"/>
+		<add key ="CancelledFlights" value="D:\CancelledFlights.txt"/>
+		<add key="CSVPath" value="D:\Samples\"/>
+		<add key="n" value='10'/>
+		<add key='DaysOfFileRetention' value='1'/>
+		<add key="Credentials" value="xLr7wG3Vh4eM2n2wtKXRvzOz2Sha65EFv1vbPbHx1DsqXzCaa76pQqxSQDjfdviMF4ldgKHDFhK+FIP7nGBDpDp5WVVB3EgIfLfO/T5c2Z3PaEyAJBSvwku1jqJbiTKs"/>
+		<add key="Code" value="abcd"/>
+	</appSettings>
+
+	<system.serviceModel>
+		<bindings>
+			<basicHttpBinding>
+				<binding name="RequestWSSoapBinding">
+					<security mode="Transport" />
+				</binding>
+				<binding name="RequestWSSoapBinding1" />
+			</basicHttpBinding>
+		</bindings>
+		<client>
+			<endpoint address="https://maintenix-test.capeair.com/mxcorews/services/RequestWS"
+                binding="basicHttpBinding" bindingConfiguration="RequestWSSoapBinding"
+                contract="ServiceReference1.RequestWS" name="RequestWS" />
+		</client>
+	</system.serviceModel>
+</configuration>

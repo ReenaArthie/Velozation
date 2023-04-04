@@ -1,0 +1,548 @@
+using System;
+using System.IO;
+using System.Linq;
+using System.Xml;
+using System.Net;
+using System.Configuration;
+using System.Text;
+using System.Security.Cryptography;
+using System.Globalization;
+using System.Threading;
+using System.ServiceProcess;
+using MaintenixFlightUploads;
+using Timer = System.Timers.Timer;
+
+namespace CreateXML
+{
+    class Program
+    {
+        public static bool Running { get; set; }
+        //GET THE CURRENT DATE & TIME AND READ IT AS STRING
+        private static DateTime dt = DateTime.Now;
+        private static string dtime = dt.ToString("MM-dd-yyyy HH-mm-ss");
+
+        //CONFIGURE THE PATHS FROM APP.CONFIG AS STRING
+        private static string FolderPath = ConfigurationManager.AppSettings["FolderPath"];
+        private static string SubFolder = ConfigurationManager.AppSettings["SubFolderPath"];
+        private static string ErrorPath = ConfigurationManager.AppSettings["ErrorPath"];
+        private static string CSVpath = ConfigurationManager.AppSettings["CSVPath"];
+        private static string ProcessedPath = ConfigurationManager.AppSettings["ProcessedPath"];
+        private static string xmlfile = ConfigurationManager.AppSettings["RequestXML"];
+        private static string FlightAttribute = ConfigurationManager.AppSettings["AddFlights"];
+        private static string CancelledFlights = ConfigurationManager.AppSettings["CancelledFlights"];
+
+        //CONFIGURE THE LOG PATH AS STRING
+        private static string Log_Path = SubFolder + dtime + @"\\Log\\Log.txt";
+        
+        //READ THE XML FILE AS STRING.
+        private static string xmltext = File.ReadAllText(xmlfile);
+        //READ THE FLIGHT ATTRIBUTES AS STRING
+        private static string Flight = File.ReadAllText(FlightAttribute);
+
+        private static string final_req = "";
+        private static string data_concat = "";
+
+        public static string Decrypt(string cipherText, string passPhrase)
+        {
+            int Keysize = 256;
+            int DerivationIterations = 1000;
+            //GET THE COMPLETE STREAM OF BYTES THAT REPRESENT:[32 BYTES OF SALT] + [32 BYTES OF IV] + [N BYTES OF CIPHERTEXT]
+            var cipherTextBytesWithSaltAndIv = Convert.FromBase64String(cipherText);
+            // GET THE SALTBYTES BY EXTRACTING THE FIRST 32 BYTES FROM THE SUPPLIED CIPHERTEXT BYTES.
+            var saltStringBytes = cipherTextBytesWithSaltAndIv.Take(Keysize / 8).ToArray();
+            // GET THE IV BYTES BY EXTRACTING THE NEXT 32 BYTES FROM THE SUPPLIED CIPHERTEXT BYTES.
+            var ivStringBytes = cipherTextBytesWithSaltAndIv.Skip(Keysize / 8).Take(Keysize / 8).ToArray();
+            // GET THE ACTUAL CIPHER TEXT BYTES BY REMOVING THE FIRST 64 BYTES FROM THE CIPHERTEXT STRING.
+            var cipherTextBytes = cipherTextBytesWithSaltAndIv.Skip((Keysize / 8) * 2).Take(cipherTextBytesWithSaltAndIv.Length - ((Keysize / 8) * 2)).ToArray();
+
+            using (var password = new Rfc2898DeriveBytes(passPhrase, saltStringBytes, DerivationIterations))
+            {
+                var keyBytes = password.GetBytes(Keysize / 8);
+                using (var symmetricKey = new RijndaelManaged())
+                {
+                    symmetricKey.BlockSize = 256;
+                    symmetricKey.Mode = CipherMode.CBC;
+                    symmetricKey.Padding = PaddingMode.PKCS7;
+                    using (var decryptor = symmetricKey.CreateDecryptor(keyBytes, ivStringBytes))
+                    {
+                        using (var memoryStream = new MemoryStream(cipherTextBytes))
+                        {
+                            using (var cryptoStream = new CryptoStream(memoryStream, decryptor, CryptoStreamMode.Read))
+                            using (var streamReader = new StreamReader(cryptoStream, Encoding.UTF8))
+                            {
+                                return streamReader.ReadToEnd();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        public static void CreateFolder(string FolderPath)
+        {
+            if (!Directory.Exists(FolderPath)) //IF THE DIRECTORY DOESN'T EXIST, CRAETE ONE.
+                Directory.CreateDirectory(FolderPath);
+            if (!Directory.Exists(ErrorPath))
+                Directory.CreateDirectory(ErrorPath);
+            if (!Directory.Exists(ProcessedPath))
+                Directory.CreateDirectory(ProcessedPath);
+        }
+
+        private static void CreateMainteinxFolder(string FolderPath, string dtime)
+        {
+            //CREATING THE STRUCTURED FOLDERS INSIDE 'MAINTENIXPROCESS' FOLDER.
+            Directory.CreateDirectory(FolderPath + $"InProgress\\{dtime}\\Input");
+            Directory.CreateDirectory(FolderPath + $"InProgress\\{dtime}\\Log");
+            Directory.CreateDirectory(FolderPath + $"InProgress\\{dtime}\\XML_Request");
+            Directory.CreateDirectory(FolderPath + $"InProgress\\{dtime}\\XML_Response");
+            var CF = File.CreateText(Log_Path);
+            CF.Close();
+            //File.WriteAllText(Log_Path, "");            
+        }
+
+        public static void Write_Log(string Message)
+        {
+            if (!File.Exists(Log_Path))  // IF IT DOESN'T EXIST, CREATE A FILE AND ADD THE LOG MESSAGE.
+            {
+                using (StreamWriter sw = File.CreateText(Log_Path))
+                {
+                    sw.WriteLine(DateTime.Now + "   " + Message);
+                    sw.WriteLine("");
+                }
+            }
+            else // IF EXIST, ADD LOG MESSAGES.
+            {
+                using (StreamWriter sw = File.AppendText(Log_Path))
+                {
+                    sw.WriteLine(DateTime.Now + "   " + Message);
+                    sw.WriteLine("");
+                }
+            }
+        }
+
+        private static string DT_Convert(string DT)
+        {
+            DateTime d;
+            //IF THE DATETIME FORMAT IS 'yyyy-MM-dd HH:mm:ss', RETURN IT. ELSE, CONVERT IT, TO THIS FORMAT AND RETURN
+            if (DateTime.TryParseExact(DT, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out d))
+            {
+                return DT;
+            }
+            else if (DateTime.TryParseExact(DT, "yyyy-MM-dd H:mm:ss", CultureInfo.InvariantCulture, DateTimeStyles.None, out d))
+            {
+                DateTime DateTM = DateTime.ParseExact(DT, "yyyy-MM-dd H:mm:ss", null);
+                string DTM = DateTM.ToString("yyyy-MM-dd HH':'mm':'ss", null);
+                return DTM;
+            }
+            else
+            {
+                DateTime DateTM = DateTime.ParseExact(DT, "dd-MM-yyyy H.mm", null);
+                string DTM = DateTM.ToString("yyyy-MM-dd HH':'mm':'ss", null);
+                return DTM;
+            }
+        }
+
+        public static void Check_Ex_Identifier(string Ex_identifier, string read_identifier)
+        {
+            if (!read_identifier.Contains(Ex_identifier))
+            {
+                using (StreamWriter sw = File.AppendText(CancelledFlights))
+                {
+                    sw.WriteLine(Ex_identifier + ",");
+                }
+            }
+        }
+
+        public static string Xml_Replace(string[] values, string Mark_Error)
+        {
+            final_req = data_concat + Flight;
+
+            string DEP_DATE = values[9];
+            string ARR_DATE = values[10];
+            string EST_DEP_DATE = values[11];
+            string EST_ARR_DATE = values[12];
+            string ACT_DEP_DATE = values[13];
+            string ACT_ARR_DATE = values[14];
+            string UP_DATE = values[15];
+            string DOWN_DATE = values[16];
+
+            data_concat = final_req.Replace("{KEY}", values[2]).Replace("{NAME}", values[0]).Replace("{OPERATION}", values[3])
+                        .Replace("{CODE}", values[6]).Replace("{DEP}", values[7]).Replace("{ARR}", values[8]).Replace("{Mark_In_Error}", Mark_Error);
+
+            if (String.IsNullOrEmpty(DEP_DATE))
+            {
+                data_concat = data_concat.Replace("{SCHEDULED_DEP_DATE}", "");
+            }
+            else
+            {
+                string c = DT_Convert(DEP_DATE);
+                data_concat = data_concat.Replace("{SCHEDULED_DEP_DATE}", "<scheduled-departure-date>{SH_DEP_DATE}</scheduled-departure-date>");
+                data_concat = data_concat.Replace("{SH_DEP_DATE}", c);
+            }
+            if (String.IsNullOrEmpty(ARR_DATE))
+            {
+                data_concat = data_concat.Replace("{SCHEDULED_ARR_DATE}", "");
+            }
+            else
+            {
+                string c = DT_Convert(ARR_DATE);
+                data_concat = data_concat.Replace("{SCHEDULED_ARR_DATE}", "<scheduled-arrival-date>{SH_ARR_DATE}</scheduled-arrival-date>");
+                data_concat = data_concat.Replace("{SH_ARR_DATE}", c);
+            }
+            if (String.IsNullOrEmpty(ACT_DEP_DATE))
+            {
+                data_concat = data_concat.Replace("{ACTUAL_DEP_DATE}", "");
+            }
+            else
+            {
+                string c = DT_Convert(ACT_DEP_DATE);
+                data_concat = data_concat.Replace("{ACTUAL_DEP_DATE}", "<actual-departure-date>{ACT_DEP_DATE}</actual-departure-date>");
+                data_concat = data_concat.Replace("{ACT_DEP_DATE}", c);
+            }
+            if (String.IsNullOrEmpty(ACT_ARR_DATE))
+            {
+                data_concat = data_concat.Replace("{ACTUAL_ARR_DATE}", "");
+            }
+            else
+            {
+                string c = DT_Convert(ACT_ARR_DATE);
+                data_concat = data_concat.Replace("{ACTUAL_ARR_DATE}", "<actual-arrival-date>{ACT_ARR_DATE}</actual-arrival-date>");
+                data_concat = data_concat.Replace("{ACT_ARR_DATE}", c);
+            }
+            if (String.IsNullOrEmpty(UP_DATE))
+            {
+                data_concat = data_concat.Replace("{UP_DATE}", "");
+            }
+            else
+            {
+                string c = DT_Convert(UP_DATE);
+                data_concat = data_concat.Replace("{UP_DATE}", "<up-date>{U_DATE}</up-date>");
+                data_concat = data_concat.Replace("{U_DATE}", c);
+            }
+            if (String.IsNullOrEmpty(DOWN_DATE))
+            {
+                data_concat = data_concat.Replace("{DOWN_DATE}", "");
+
+            }
+            else
+            {
+                string c = DT_Convert(DOWN_DATE);
+                data_concat = data_concat.Replace("{DOWN_DATE}", "<down-date>{D_DATE}</down-date>");
+                data_concat = data_concat.Replace("{D_DATE}", c);
+
+            }
+            if (!String.IsNullOrEmpty(ACT_DEP_DATE) && String.IsNullOrEmpty(ACT_ARR_DATE) && String.IsNullOrEmpty(UP_DATE) && String.IsNullOrEmpty(DOWN_DATE))
+            {
+                string c = DT_Convert(EST_DEP_DATE);
+                data_concat = data_concat.Replace("{EST_DEP_DATE}", "<estimated-departure-date>{E_DEP_TIME}</estimated-departure-date>");
+                data_concat = data_concat.Replace("{E_DEP_TIME}", c);
+
+            }
+            else
+            {
+                data_concat = data_concat.Replace("{EST_DEP_DATE}", "");
+
+            }
+            if (!String.IsNullOrEmpty(ACT_DEP_DATE) && String.IsNullOrEmpty(ACT_ARR_DATE) && String.IsNullOrEmpty(UP_DATE) && String.IsNullOrEmpty(DOWN_DATE))
+            {
+                string c = DT_Convert(EST_ARR_DATE);
+                data_concat = data_concat.Replace("{EST_ARR_DATE}", "<estimated-arrival-date>{E_ARR_TIME}</estimated-arrival-date>");
+                data_concat = data_concat.Replace("{E_ARR_TIME}", c);
+                return data_concat;
+            }
+            else
+            {
+                data_concat = data_concat.Replace("{EST_ARR_DATE}", "");
+                return data_concat;
+            }
+        }
+
+        public static void Execute(string FolderPath, string dtime)
+        {
+            int j = 1;
+            var milliseconds = 10000;
+            Thread.Sleep(milliseconds);
+            //GETTING ALL THE CSV SAMPLE FILES.
+            string[] csvFiles = Directory.GetFiles(CSVpath, "*.csv");
+            //PROCESSING EACH CSV USING FOREACH.
+            foreach (string CSV_File in csvFiles)
+            {
+                string read_csv = File.ReadAllText(CSV_File);
+                string filename = Path.GetFileName(CSV_File);
+
+                // N - SIZE OF EACH SET OF REQUEST (LINES FROM CSV FILE).
+                int n = Convert.ToInt32(ConfigurationManager.AppSettings["n"]);
+                Write_Log($"The request gets sent one batch at a time. The size of each batch: {n}");
+
+                StreamReader reader = null;
+                reader = new StreamReader(File.OpenRead(CSV_File));
+                reader.ReadLine();
+
+                int i = 1;
+                while (!reader.EndOfStream) //READ TILL THE END OF FILE
+                {
+                    var line = reader.ReadLine();
+                    var values = line.Split(',');
+
+                    if (String.IsNullOrEmpty(values[6]))
+                    {
+                        i++;
+                        continue;
+                    }
+                    else
+                    {
+                        if (!File.Exists(CancelledFlights))  // IF IT DOESN'T EXIST, CREATE A FILE AND ADD THE IDENTIFIER
+                        {
+                            File.CreateText(CancelledFlights);
+                        }
+                        else
+                        {
+                            string read_identifier = File.ReadAllText(CancelledFlights);
+                            if (values[17].Contains("N")) //&& !read_identifier.Contains(values[2]))
+                            {
+                                i++;
+                                Xml_Replace(values, "0");
+                            }
+                            else if (values[17].Contains("Y") && !read_identifier.Contains(values[2]))
+                            {
+                                i++;
+                                Xml_Replace(values, "1");
+                                Check_Ex_Identifier(values[2], read_identifier);
+                            }
+                            else if (values[17].Contains("Y") && read_identifier.Contains(values[2]))
+                            {
+                                i++;
+                                continue;
+                            }
+                        }
+                    }
+
+                    //CONTINUE THE LOOP TILL THE END OF FILE
+                    if (i <= n && !reader.EndOfStream)
+                    {
+                        continue;
+                    }
+
+                    //ADD THE FLIGHT ATTRIBUTE IN REQUEST.XML FILE
+                    string sendReq = xmltext.Replace("{FLIGHTS}", data_concat);
+                    final_req = "";
+                    data_concat = "";
+
+                    //REQUEST.XML IS STORED IN 'XML_Request' FOLDER
+                    File.WriteAllText($"{FolderPath}InProgress\\{dtime}\\XML_Request\\Request{j}_{filename}.xml", sendReq);
+                    Write_Log($"The request send in batch {j} gets stored in the 'XML_Request' folder.");
+
+                    XmlDocument soapEnvelopeXml = new XmlDocument();
+                    soapEnvelopeXml.Load($"{FolderPath}InProgress\\{dtime}\\XML_Request\\Request{j}_{filename}.xml");
+
+                    string Code = ConfigurationManager.AppSettings["Code"]; //Code: abcd
+                    string encryptedstring = ConfigurationManager.AppSettings["Credentials"];
+                    string decryptedstring = Decrypt(encryptedstring, Code); //DECRYPTING THE CREDENTIALS.
+                    var cred = decryptedstring.Split(':');
+
+                    //SEND REQUEST WITH THE DECRYPTED CREDENTIALS.
+                    try
+                    {
+                        HttpWebRequest request = CreateWebRequest();
+                        request.Credentials = new NetworkCredential(cred[0], cred[1]);
+                        //ADDING A CERTIFICATE VALIDATION HANDLER. RETURNING TRUE WILL ALLOW IGNORING THE VALIDATION ERROR.
+                        ServicePointManager.ServerCertificateValidationCallback += (sender, cert, chain, sslPolicyErrors) => true;
+
+                        InsertSoapEnvelopeIntoWebRequest(soapEnvelopeXml, request);
+
+                        //GET THE RESPONSE FROM THE REQUEST SENT
+                        GetResp(request, FolderPath, j, dtime, filename, CSV_File);
+
+                    }
+                    catch
+                    {
+                        Write_Log("Error in Sending Request");
+                    }
+
+                    i = 1; j++;
+                }
+                Write_Log("Status - Success.");
+
+                reader.Close();
+                if (!File.Exists(ProcessedPath + filename))
+                {
+                    File.Move(CSVpath + filename, ProcessedPath + filename);
+                    reader.Close();
+                    Console.WriteLine();
+                    Console.WriteLine("PROCESSED - " + filename + " (" + DateTime.Now + ")");
+                }
+                else
+                {
+                    File.WriteAllText(ProcessedPath + filename, read_csv);
+                    File.Delete(CSVpath + filename);
+                    reader.Close();
+                    Console.WriteLine();
+                    Console.WriteLine("PROCESSED - " + filename + " (" + DateTime.Now + ")");
+                }
+            }
+        }
+        public static HttpWebResponse GetResp(HttpWebRequest request, string FolderPath, int j, string dtime, string name, string CSV_Path)
+        {
+            try
+            {
+                using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                {
+                    using (StreamReader rd = new StreamReader(response.GetResponseStream()))
+                    {
+                        string success = "msg_status=\"COMPLETE\"";
+                        string error = "msg_status=\"ERROR\"";
+                        string soapResult = rd.ReadToEnd();
+                        Console.WriteLine(soapResult);
+                        response.Close();
+                        //THE RESPONSE GETS STORED IN 'XML_Response' FOLDER IN XML FILE.
+                        File.WriteAllText($"{FolderPath}InProgress\\{dtime}\\XML_Response\\Result{j}_{name}.xml", soapResult);
+
+                        //IF THE RESPONSE GIVES SUCCESS MESSAGE, SAVE THE INPUT CSV FILE IN 'Success' FOLDER.
+                        if (soapResult.Contains(success))
+                        {
+                            Write_Log("Got response with the message status - COMPLETE");
+                            //File.Copy(CSV_Path, SuccessPath + name, true);
+                        }
+                        //IF THE RESPONSE GIVES ERROR MESSAGE, SAVE THE INPUT CSV FILE IN 'Error' FOLDER.
+                        else if (soapResult.Contains(error))
+                        {
+                            Write_Log("Got response with the message status - ERROR");
+                            File.Copy(CSV_Path, ErrorPath + name, true);
+                        }
+                        Write_Log($"The response received for the request-{j} gets stored in the 'XML_Response' folder.");
+                        return response;
+                    }
+                }
+            }
+            catch (WebException webex)
+            {
+                WebResponse errResp = webex.Response;
+                using (Stream respStream = errResp.GetResponseStream())
+                {
+                    StreamReader read = new StreamReader(respStream);
+                    string text = read.ReadToEnd();
+                    return (HttpWebResponse)errResp;
+                }
+            }
+        }
+        public static HttpWebRequest CreateWebRequest()
+        {
+            HttpWebRequest webRequest = (HttpWebRequest)WebRequest.Create(@"https://maintenix-test.capeair.com/mxcorews/services/RequestWS");
+            webRequest.Headers.Add(@"SOAPAction", "https://maintenix-test.capeair.com/mxcorews/services/RequestWS");
+            webRequest.ContentType = "text/xml;charset=\"utf-8\"";
+            webRequest.Accept = "text/xml";
+            webRequest.Method = "POST";
+            return webRequest;
+        }
+        private static void InsertSoapEnvelopeIntoWebRequest(XmlDocument soapEnvelopeXml, HttpWebRequest webRequest)
+        {
+            using (Stream stream = webRequest.GetRequestStream())
+            {
+                soapEnvelopeXml.Save(stream);
+            }
+        }
+        private static void FolderRetention(string path, TimeSpan dor)
+        {
+            try
+            {
+                string[] files = Directory.GetDirectories(path);
+                foreach (string file in files)
+                {
+                    DirectoryInfo d = new DirectoryInfo(file);
+                    if (d.CreationTime < DateTime.Now.Subtract(dor))
+                    {
+                        Directory.Delete(file, true);
+                        //d.Delete();
+                    }
+                }
+            }
+            catch(Exception e)
+            {
+                Console.WriteLine(e);
+            }
+        }
+        private static void FileRetention(string path, TimeSpan dor)
+        {
+            try
+            {
+                string[] files = Directory.GetFiles(path);
+                foreach (string file in files)
+                {
+                    FileInfo fi = new FileInfo(file);
+                    if (fi.CreationTime < DateTime.Now.Subtract(dor))
+                    {
+                        fi.Delete();
+                    }
+                }
+            }
+            catch
+            {
+
+            }
+        }
+        public static void OnChanged(object source, FileSystemEventArgs e)
+        {
+            Execute(FolderPath, dtime);
+        }
+        static void OnTimerEvent(object sender, EventArgs e)
+        {
+            string dor = ConfigurationManager.AppSettings["DaysOfFileRetention"];
+            int DOR = int.Parse(dor);
+            TimeSpan tsDOR = TimeSpan.FromDays(DOR);
+            FolderRetention(SubFolder, tsDOR);
+            FileRetention(ProcessedPath, tsDOR);
+            FileRetention(ErrorPath, tsDOR);
+        }
+        public static void StartExecution()
+        {
+            Running = true;
+            CreateFolder(FolderPath);
+            CreateMainteinxFolder(FolderPath, dtime); //CREATE THE SUBFOLDERS
+            Write_Log("The structured path for the folders are Created");
+
+            //EXECUTE FILE/FOLDER RETENTION ONCE IN A DAY
+            Timer aTimer = new Timer(TimeSpan.FromHours(24).TotalMilliseconds);
+            //Timer aTimer = new Timer(30000);
+            aTimer.Elapsed += OnTimerEvent;            
+            aTimer.AutoReset = true;
+            aTimer.Enabled = true;
+            aTimer.Start();
+       
+            try
+            {
+                // CREATE A NEW FILESYSTEMWATCHER AND SET ITS PROPERTIES.  
+                FileSystemWatcher watcher = new FileSystemWatcher();
+                watcher.Path = CSVpath;
+                // WATCH ALL CSV FILES.  
+                watcher.Filter = "*.csv";
+                //EVENT HANDLERS.                  
+                watcher.Created += new FileSystemEventHandler(OnChanged);
+                watcher.Changed += new FileSystemEventHandler(OnChanged);
+                watcher.EnableRaisingEvents = true;
+                while (Running)
+                {
+                    Thread.Sleep(1000);
+                }
+            }
+            catch (IOException e)
+            {
+                Write_Log("A Exception Occurred :" + e);
+                //Console.WriteLine("A Exception Occurred :" + e);
+            }
+            catch (Exception oe)
+            {
+                Write_Log("An Exception Occurred :" + oe);
+                //Console.WriteLine("An Exception Occurred :" + oe);
+            }
+        }
+        static void Main(string[] args)
+        {
+            //Program.StartExecution();
+            //return;
+            ServiceBase[] ServicesToRun = new ServiceBase[]
+            {
+                new MaintenixFlightUploadService()
+            };
+            ServiceBase.Run(ServicesToRun);
+        }
+    }
+}

@@ -1,0 +1,32 @@
+using CreateXML;
+using System.ServiceProcess;
+using System.Threading;
+
+namespace MaintenixFlightUploads
+{
+    partial class MaintenixFlightUploadService : ServiceBase
+    {
+        private static Thread workerThread = null;
+
+        public MaintenixFlightUploadService()
+        {
+            InitializeComponent();
+        }
+
+        protected override void OnStart(string[] args)
+        {
+            workerThread = new Thread(() =>
+            {
+                Program.StartExecution();
+            });
+
+            workerThread.IsBackground = true;
+            workerThread.Start();
+        }
+
+        protected override void OnStop()
+        {
+            Program.Running = false;
+        }
+    }
+}
